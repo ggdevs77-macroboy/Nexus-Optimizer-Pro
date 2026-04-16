@@ -144,24 +144,54 @@ class App(ctk.CTk):
 
     def show_uninst(self):
         self.header_label.configure(text="Gestão de Aplicativos")
-        self.desc_label.configure(text="Varredura de software profunda.")
+        self.desc_label.configure(text="Varredura de software profunda no Registro do Windows.")
         self.clear_content()
-        self.criar_action_btn("Escanear Programas Instalados", self.log_uninst_info).pack(fill="x", pady=5)
+        
+        self.criar_action_btn("Escanear Programas Instalados", self.escanear_programas).pack(fill="x", pady=5)
+        
+        # Cria a caixa suspensa (Dropdown) para mostrar os programas
+        self.combo_programas = ctk.CTkOptionMenu(self.actions_container, 
+                                                values=["Escaneie para listar os programas..."], 
+                                                width=450, 
+                                                fg_color="#1f1f1f", 
+                                                button_color="#2a2a2a")
+        self.combo_programas.pack(pady=10)
+        
+        # Botão de exterminar
+        self.criar_action_btn("Desinstalar Selecionado", self.desinstalar_prog, self.COLOR_DANGER).pack(fill="x", pady=5)
 
     # --- LÓGICA DAS FUNÇÕES (LIMPEZA) ---
     def limpar_temp(self):
-        self.log("Buscando arquivos de cache temporário...")
-        temp_path = os.environ.get('TEMP')
-        try:
-            for item in os.listdir(temp_path):
-                caminho = os.path.join(temp_path, item)
-                try:
-                    if os.path.isfile(caminho): os.unlink(caminho)
-                    elif os.path.isdir(caminho): shutil.rmtree(caminho)
-                except: pass
-            self.log("Limpeza de arquivos temporários concluída.")
-        except:
-            self.log("Não foi possível acessar algumas pastas de cache.")
+        self.log("Iniciando varredura nas pastas Temp e %Temp%...")
+        self.update() # Atualiza a tela
+        
+        # Agora o programa ataca as duas pastas corretamente
+        pastas_alvo = [
+            os.environ.get('TEMP'),  # %temp% (Arquivos do Usuário)
+            r'C:\Windows\Temp'       # temp (Arquivos do Sistema)
+        ]
+        
+        arquivos_apagados = 0
+        arquivos_bloqueados = 0
+        
+        for pasta in pastas_alvo:
+            if pasta and os.path.exists(pasta):
+                for item in os.listdir(pasta):
+                    caminho = os.path.join(pasta, item)
+                    try:
+                        # Tenta deletar o arquivo ou pasta
+                        if os.path.isfile(caminho):
+                            os.unlink(caminho)
+                        elif os.path.isdir(caminho):
+                            shutil.rmtree(caminho)
+                        arquivos_apagados += 1
+                    except Exception:
+                        # Se der erro, é porque o Windows está usando o arquivo agora
+                        arquivos_bloqueados += 1
+                        
+        self.log(f"Limpeza concluída! Itens removidos: {arquivos_apagados}")
+        if arquivos_bloqueados > 0:
+            self.log(f"Nota: {arquivos_bloqueados} itens estão em uso pelo sistema e foram ignorados.")
 
     def limpar_update_cache(self):
         if not self.is_admin():
@@ -236,7 +266,7 @@ class App(ctk.CTk):
         self.log("--- TOP 5 PROCESSOS (CPU) ---")
         if top_5:
             for p in top_5:
-                # Formata o texto para ficar alinhado: Uso: 12.5% | Processo
+                # Formata o texto para ficar alinhado
                 self.log(f"Uso: {p['cpu']:04.1f}% | Processo: {p['nome']}")
         else:
             self.log("O sistema está completamente ocioso no momento.")
@@ -322,8 +352,62 @@ class App(ctk.CTk):
         except Exception as e:
             self.log("Falha ao aplicar bloqueio no registro.")
 
-    def log_uninst_info(self):
-        self.log("A varredura de aplicativos será ativada na próxima atualização da suíte.")
+    # --- LÓGICA DAS FUNÇÕES (UNINSTALLER) ---
+    def escanear_programas(self):
+        self.log("Varrendo o Registro do Windows (32 e 64 bits)...")
+        self.update()
+        self.programas_instalados = {} # Dicionário para guardar Nome -> Comando
+
+        # Caminhos do registro onde o Windows esconde os desinstaladores
+        caminhos_registro = [
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (winreg.HKEY_LOCAL_MACHINE, r"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall"),
+            (winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Uninstall")
+        ]
+
+        for hkey, caminho in caminhos_registro:
+            try:
+                chave = winreg.OpenKey(hkey, caminho)
+                for i in range(winreg.QueryInfoKey(chave)[0]):
+                    try:
+                        sub_caminho = f"{caminho}\\{winreg.EnumKey(chave, i)}"
+                        sub_chave = winreg.OpenKey(hkey, sub_caminho)
+                        
+                        # Pega o nome do programa e o comando de desinstalar
+                        nome = winreg.QueryValueEx(sub_chave, "DisplayName")[0]
+                        cmd = winreg.QueryValueEx(sub_chave, "UninstallString")[0]
+
+                        # Se achou os dois, salva na nossa lista
+                        if nome and cmd:
+                            self.programas_instalados[nome] = cmd
+                    except: pass
+            except: pass
+
+        nomes_programas = sorted(list(self.programas_instalados.keys()))
+
+        if nomes_programas:
+            self.combo_programas.configure(values=nomes_programas)
+            self.combo_programas.set(nomes_programas[0]) # Seleciona o primeiro da lista
+            self.log(f"Varredura concluída! {len(nomes_programas)} programas detectados.")
+        else:
+            self.combo_programas.configure(values=["Nenhum programa encontrado"])
+            self.log("Nenhum programa foi detectado.")
+
+    def desinstalar_prog(self):
+        # Pega o nome que está selecionado na caixinha
+        selecionado = self.combo_programas.get()
+        
+        # Verifica se nós temos o comando dele salvo
+        if hasattr(self, 'programas_instalados') and selecionado in self.programas_instalados:
+            comando = self.programas_instalados[selecionado]
+            self.log(f"Iniciando desinstalador oficial para: {selecionado}")
+            try:
+                # Dispara o desinstalador do próprio programa
+                subprocess.Popen(comando, shell=True)
+            except Exception as e:
+                self.log("Falha ao tentar abrir o desinstalador do sistema.")
+        else:
+            self.log("Por favor, clique em Escanear e selecione um programa válido primeiro.")
 
 if __name__ == "__main__":
     app = App()
